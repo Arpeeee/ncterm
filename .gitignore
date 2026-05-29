@@ -1,0 +1,11 @@
+# data files
+*.nc
+
+# log files
+*.log
+
+# compiled binary
+/ncterm
+
+_docs/
+.claude/
