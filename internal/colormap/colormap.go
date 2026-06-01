@@ -42,20 +42,35 @@ var (
 	All = []Colormap{Viridis, Plasma, Grayscale}
 )
 
+// landColor is rendered for fill/masked cells so land areas appear as a neutral tone.
+const landColor = "#5c5c4a"
+
 // Render maps a 2D float64 grid to rows of colored terminal characters.
-// maxCols subsamples columns to fit terminal width; 0 means no limit.
-func Render(data [][]float64, cm Colormap, fillValue float64, maxCols int) []string {
+// It uses Unicode half-block characters (▄) to pack two data rows into one
+// terminal row, which compensates for the ~2:1 height-to-width aspect ratio
+// of terminal cells and keeps geographic proportions correct.
+// maxCols subsamples columns; maxRows subsamples rows (0 means no limit).
+func Render(data [][]float64, cm Colormap, fillValue float64, maxCols, maxRows int) []string {
 	min, max := dataRange(data, fillValue)
 	span := max - min
 	if span == 0 {
 		span = 1
 	}
 
-	rows := make([]string, len(data))
-	for i, row := range data {
-		rows[i] = renderRow(row, min, span, fillValue, cm, maxCols)
+	// Subsample to 2*maxRows data rows so each pair becomes one terminal row.
+	dataRows := subsampleDataRows(data, maxRows*2)
+
+	nOut := (len(dataRows) + 1) / 2
+	out := make([]string, nOut)
+	for i := range out {
+		top := dataRows[i*2]
+		bot := top
+		if i*2+1 < len(dataRows) {
+			bot = dataRows[i*2+1]
+		}
+		out[i] = renderHalfBlockRow(top, bot, min, span, fillValue, cm, maxCols)
 	}
-	return rows
+	return out
 }
 
 // Stats returns min, max, and mean of data, ignoring fill values and NaN.
@@ -86,19 +101,51 @@ func Stats(data [][]float64, fillValue float64) (min, max, mean float64) {
 	return min, max, sum / float64(count)
 }
 
-func renderRow(row []float64, min, span, fillValue float64, cm Colormap, maxCols int) string {
-	indices := columnIndices(len(row), maxCols)
+// renderHalfBlockRow renders two data rows as one terminal row using ▄ (U+2584).
+// The upper pixel maps to background color, the lower pixel to foreground color.
+func renderHalfBlockRow(top, bot []float64, min, span, fillValue float64, cm Colormap, maxCols int) string {
+	indices := columnIndices(len(top), maxCols)
 	var b strings.Builder
 	for _, j := range indices {
-		v := row[j]
-		if isMasked(v, fillValue) {
-			b.WriteString(" ")
-			continue
+		topC := cellColor(top[j], min, span, fillValue, cm)
+		botJ := j
+		if botJ >= len(bot) {
+			botJ = len(bot) - 1
 		}
-		t := (v - min) / span
-		b.WriteString(colorCell(t, cm))
+		botC := cellColor(bot[botJ], min, span, fillValue, cm)
+		b.WriteString(lipgloss.NewStyle().
+			Background(lipgloss.Color(topC)).
+			Foreground(lipgloss.Color(botC)).
+			Render("▄"))
 	}
 	return b.String()
+}
+
+func cellColor(v, min, span, fillValue float64, cm Colormap) string {
+	if isMasked(v, fillValue) {
+		return landColor
+	}
+	t := (v - min) / span
+	n := len(cm.Colors)
+	i := int(t * float64(n-1))
+	if i < 0 {
+		i = 0
+	}
+	if i >= n {
+		i = n - 1
+	}
+	return cm.Colors[i]
+}
+
+func subsampleDataRows(data [][]float64, max int) [][]float64 {
+	if max <= 0 || len(data) <= max {
+		return data
+	}
+	out := make([][]float64, max)
+	for i := range out {
+		out[i] = data[int(float64(i)*float64(len(data))/float64(max))]
+	}
+	return out
 }
 
 func columnIndices(total, maxCols int) []int {
@@ -116,17 +163,6 @@ func columnIndices(total, maxCols int) []int {
 	return idx
 }
 
-func colorCell(t float64, cm Colormap) string {
-	n := len(cm.Colors)
-	i := int(t * float64(n-1))
-	if i < 0 {
-		i = 0
-	}
-	if i >= n {
-		i = n - 1
-	}
-	return lipgloss.NewStyle().Background(lipgloss.Color(cm.Colors[i])).Render(" ")
-}
 
 func dataRange(data [][]float64, fillValue float64) (min, max float64) {
 	min = math.Inf(1)

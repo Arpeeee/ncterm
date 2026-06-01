@@ -139,8 +139,7 @@ func (m *Viewer) renderSlice(width, height int) string {
 	if m.slice == nil {
 		return "No spatial data\n(select a variable with lat/lon dims)"
 	}
-	rows := colormap.Render(m.slice, colormap.All[m.cmIdx], m.fillValue, width)
-	rows = subsampleRows(rows, height)
+	rows := colormap.Render(m.slice, colormap.All[m.cmIdx], m.fillValue, width, height)
 	return strings.Join(rows, "\n")
 }
 
@@ -305,15 +304,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
-}
-
-func subsampleRows(rows []string, maxHeight int) []string {
-	if maxHeight <= 0 || len(rows) <= maxHeight {
-		return rows
-	}
-	out := make([]string, maxHeight)
-	for i := range out {
-		out[i] = rows[int(float64(i)*float64(len(rows))/float64(maxHeight))]
-	}
-	return out
 }
