@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -108,7 +109,7 @@ func (m *Viewer) View() string {
 	if m.showInspect {
 		right = renderVariable(m.vars[m.selected])
 	} else {
-		right = m.renderSlice(rightW, m.height-4)
+		right = m.renderSlice(rightW, m.height-2)
 	}
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
@@ -139,8 +140,115 @@ func (m *Viewer) renderSlice(width, height int) string {
 	if m.slice == nil {
 		return "No spatial data\n(select a variable with lat/lon dims)"
 	}
-	rows := colormap.Render(m.slice, colormap.All[m.cmIdx], m.fillValue, width, height)
-	return strings.Join(rows, "\n")
+
+	// Reserve 3 lines for the frame: top border, bottom border, lon label row.
+	const frameLines = 3
+	mapHeight := height - frameLines
+	if mapHeight < 1 {
+		mapHeight = 1
+	}
+
+	// Maintain geographic aspect ratio.
+	// Half-block chars give 2 data pixels per terminal row, and terminal chars are
+	// ~2:1 (h:w), so the visual pixel ratio is cols / (2 * rows).
+	// Target: cols / (2 * rows) = lonN / latN
+	latN := float64(len(m.slice))
+	lonN := float64(0)
+	if latN > 0 {
+		lonN = float64(len(m.slice[0]))
+	}
+	cols, rows := width, mapHeight
+	if latN > 0 && lonN > 0 {
+		aspect := lonN / latN
+		if float64(cols) > aspect*2.0*float64(rows) {
+			cols = int(math.Round(aspect * 2.0 * float64(rows)))
+		} else {
+			rows = int(math.Round(float64(cols) / (aspect * 2.0)))
+		}
+		if cols < 1 {
+			cols = 1
+		}
+		if rows < 1 {
+			rows = 1
+		}
+	}
+
+	mapRows := colormap.Render(m.slice, colormap.All[m.cmIdx], m.fillValue, cols, rows)
+
+	latMax, latMin := m.latExtent()
+	lonMin, lonMax := m.lonExtent()
+
+	topLat := formatLat(latMax)
+	botLat := formatLat(latMin)
+	labelW := len(topLat)
+	if len(botLat) > labelW {
+		labelW = len(botLat)
+	}
+	topLat = fmt.Sprintf("%-*s", labelW, topLat)
+	botLat = fmt.Sprintf("%-*s", labelW, botLat)
+	indent := strings.Repeat(" ", labelW)
+	border := strings.Repeat("─", cols)
+
+	var b strings.Builder
+	b.WriteString(topLat + " ┌" + border + "┐\n")
+	for _, row := range mapRows {
+		b.WriteString(indent + " │" + row + "│\n")
+	}
+	b.WriteString(botLat + " └" + border + "┘\n")
+
+	// Lon labels: left-aligned at start of border, right-aligned at end.
+	leftLon := formatLon(lonMin)
+	rightLon := formatLon(lonMax)
+	innerW := cols + 2 // interior width including │ chars
+	pad := innerW - len(leftLon) - len(rightLon)
+	if pad < 1 {
+		pad = 1
+	}
+	b.WriteString(indent + " " + leftLon + strings.Repeat(" ", pad) + rightLon)
+
+	return b.String()
+}
+
+func (m *Viewer) latExtent() (latMax, latMin float64) {
+	if m.latDim != "" {
+		if v := findVar(m.file, m.latDim); v != nil {
+			vals := v.Float64s()
+			if len(vals) > 0 {
+				a, b := vals[0], vals[len(vals)-1]
+				if a > b {
+					return a, b
+				}
+				return b, a
+			}
+		}
+	}
+	return 90, -90
+}
+
+func (m *Viewer) lonExtent() (lonMin, lonMax float64) {
+	if m.lonDim != "" {
+		if v := findVar(m.file, m.lonDim); v != nil {
+			vals := v.Float64s()
+			if len(vals) > 0 {
+				return vals[0], vals[len(vals)-1]
+			}
+		}
+	}
+	return -180, 180
+}
+
+func formatLat(deg float64) string {
+	if deg >= 0 {
+		return fmt.Sprintf("%.1f°N", deg)
+	}
+	return fmt.Sprintf("%.1f°S", -deg)
+}
+
+func formatLon(deg float64) string {
+	if deg >= 0 {
+		return fmt.Sprintf("%.0f°E", deg)
+	}
+	return fmt.Sprintf("%.0f°W", -deg)
 }
 
 func (m *Viewer) renderStatus() string {
@@ -211,6 +319,16 @@ func (m *Viewer) reloadSlice() {
 	}
 	m.slice = v.Slice2D(m.latDim, m.lonDim, outer)
 	if m.slice != nil {
+		// Ensure north is at top (row 0). Many files store lat ascending
+		// (south-first); flip rows so the display always matches convention.
+		if latVar := findVar(m.file, m.latDim); latVar != nil {
+			vals := latVar.Float64s()
+			if len(vals) > 1 && vals[0] < vals[len(vals)-1] {
+				for i, j := 0, len(m.slice)-1; i < j; i, j = i+1, j-1 {
+					m.slice[i], m.slice[j] = m.slice[j], m.slice[i]
+				}
+			}
+		}
 		m.sliceMin, m.sliceMax, m.sliceMean = colormap.Stats(m.slice, m.fillValue)
 	}
 }
